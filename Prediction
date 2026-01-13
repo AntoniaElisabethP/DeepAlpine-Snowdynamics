@@ -1,0 +1,99 @@
+#NDSI-Prediciton based on trained XGBoost Regressor with CMIP6-Scenario-Data
+import xarray as xr
+import numpy as np
+import joblib
+import os
+import pandas as pd
+
+# =========================================================
+# 1. PFADE & KONFIGURATION
+# =========================================================
+master_zarr   = r"C:\Alpine_Deep_Learning\Bearbeitung\RF_first\dem_era_ndsi_1km.zarr"
+interp_folder = r"C:\Alpine_Deep_Learning\Bearbeitung\Klima_1km_Interpoliert"
+# WICHTIG: Das Modell muss mit 6 Features trainiert worden sein!
+model_path    = r"C:\Alpine_Deep_Learning\Modelle\xgboost_ndsi_model_f.joblib"
+output_folder = r"C:\Alpine_Deep_Learning\Ergebnis\Vorhersage\rf\final_bias_cap"
+
+os.makedirs(output_folder, exist_ok=True)
+
+print("Lade Modell...")
+rf = joblib.load(model_path)
+
+ds_master = xr.open_zarr(master_zarr)
+lat_name = "latitude" if "latitude" in ds_master.coords else "lat"
+lon_name = "longitude" if "longitude" in ds_master.coords else "lon"
+
+if ds_master["elevation"].ndim == 3:
+    dim_0 = ds_master["elevation"].dims[0]
+    elevation_2d = ds_master["elevation"].isel({dim_0: 0}).values
+else:
+    elevation_2d = ds_master["elevation"].values
+
+elevation_flat = elevation_2d.ravel()
+n_pixel_target = elevation_flat.size
+
+# Elevation Capping (Konsistent zum Training bei 2000m)
+elevation_capped = np.clip(elevation_flat, a_min=None, a_max=2000)
+
+print(f"Master-Check: Gitter {elevation_2d.shape}, Gesamtpixel: {n_pixel_target}")
+
+# =========================================================
+# 2. VORHERSAGE-SCHLEIFE
+# =========================================================
+szenarien = ["ssp119", "ssp126", "ssp245", "ssp370", "ssp585"]
+
+for sz in szenarien:
+    input_zarr = os.path.join(interp_folder, f"Klima_1km_{sz}.zarr")
+    if not os.path.exists(input_zarr):
+        print(f"⚠️ Datei fehlt: {input_zarr}")
+        continue
+
+    print(f"\n>>> Starte Vorhersage für Szenario: {sz}")
+    ds_klima = xr.open_zarr(input_zarr)
+    ds_klima = ds_klima.reindex({lat_name: ds_master[lat_name], lon_name: ds_master[lon_name]}, method="nearest")
+    
+    ndsi_months = []
+
+    for i in range(len(ds_klima.time)):
+        t_val = ds_klima.time.values[i]
+        dt_obj = pd.to_datetime(t_val)
+        
+        # Klimadaten extrahieren
+        t2m_vals = ds_klima["t2m"].isel(time=i).values.ravel()
+        tp_vals = ds_klima["tp"].isel(time=i).values.ravel()
+        ssrd_vals = ds_klima["ssrd"].isel(time=i).values.ravel()
+        ro_vals = ds_klima["ro"].isel(time=i).values.ravel()
+
+        # Interaktions-Variable
+        temp_elev_interact = t2m_vals * elevation_capped
+
+        # Features stapeln (NUR NOCH 6 FEATURES)
+        X = np.column_stack([
+            t2m_vals,
+            tp_vals,
+            ssrd_vals,
+            ro_vals,
+            elevation_capped,      # Feature 5
+            temp_elev_interact     # Feature 6
+        ])
+
+        y_pred = rf.predict(np.nan_to_num(X))
+        ndsi_map = y_pred.reshape(elevation_2d.shape)
+
+        ndsi_da = xr.DataArray(
+            ndsi_map.astype(np.float32),
+            coords={lat_name: ds_master[lat_name], lon_name: ds_master[lon_name]},
+            dims=(lat_name, lon_name),
+            name="ndsi_rf"
+        ).expand_dims(time=[t_val])
+
+        ndsi_months.append(ndsi_da)
+        print(f"    ✅ {dt_obj.strftime('%Y-%m')} fertig.")
+
+    if ndsi_months:
+        ds_final = xr.concat(ndsi_months, dim="time").to_dataset()
+        out_file = os.path.join(output_folder, f"NDSI_Oetztal_{sz}.zarr")
+        ds_final.to_zarr(out_file, mode="w")
+        print(f"💾 Gespeichert: {out_file}")
+
+print("\n--- Alle Vorhersagen abgeschlossen ---")
