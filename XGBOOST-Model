@@ -1,0 +1,148 @@
+# XGBoost Modell 2 für NDSI Vorhersage mit Temperatur & Höhen Interaktionen
+import xarray as xr
+import pandas as pd
+import numpy as np
+import joblib
+import os
+import time
+import xgboost as xgb
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
+
+# ---------------------------------------------------------
+# 1. KONFIGURATION & PFADE
+# ---------------------------------------------------------
+input_zarr = r"C:\Alpine_Deep_Learning\Bearbeitung\RF_first\dem_era_ndsi_1km.zarr"
+model_out_path = r"C:\Alpine_Deep_Learning\Modelle\xgboost_ndsi_model_f.json"
+os.makedirs(os.path.dirname(model_out_path), exist_ok=True)
+
+# ---------------------------------------------------------
+# 2. DATEN LADEN & PHYSIKALISCHES FEATURE-ENGINEERING
+# ---------------------------------------------------------
+print("Lade Datensatz und berechne Lag-Features...")
+ds = xr.open_zarr(input_zarr)
+
+# Lag-Features: Zustand des Vormonats (wichtig für Schneekumulation)
+#ds['t2m_lag1'] = ds['t2m'].shift(time=1)
+#ds['tp_lag1'] = ds['tp'].shift(time=1)
+
+# ... (Laden des Datensatzes 'ds' bleibt gleich)
+
+# 1. Zielvariable definieren (Sicherstellen, dass sie im ds existiert!)
+target_name = 'ndsi_mean'  # Falls deine Zielvariable im xarray anders heißt, hier anpassen
+
+# 2. Elevation Capping (Wichtig für die Klimasensitivität)
+elevation_raw = ds.elevation.values.flatten()
+elevation_capped = np.clip(elevation_raw, a_min=None, a_max=2000)
+
+# 3. Interaktionsvariable berechnen
+t2m_flat = ds.t2m.values.flatten()
+temp_elev_interact = t2m_flat * elevation_capped
+
+# 4. Dictionary für den DataFrame erstellen
+data_dict = {
+    't2m': t2m_flat,
+    'tp': ds.tp.values.flatten(),
+    'ssrd': ds.ssrd.values.flatten(),
+    'ro': ds.ro.values.flatten(),
+    'elevation': elevation_capped,
+    'interaction': temp_elev_interact,
+    'target': ds[target_name].values.flatten()  # Hier wird die Spalte 'target' erzeugt
+}
+
+# 5. DataFrame erstellen und NaNs entfernen
+df = pd.DataFrame(data_dict).dropna().reset_index(drop=True)
+
+# 6. Features definieren (Exakt 8 Spalten)
+feature_cols = ['t2m', 'tp', 'ssrd', 'ro', 'elevation', 'interaction']
+X = df[feature_cols]
+y = df['target']  # Jetzt existiert die Spalte garantiert!
+# ---------------------------------------------------------
+# 3. DATENBEREINIGUNG, INTERAKTION & SPLIT
+# ---------------------------------------------------------
+df = pd.DataFrame(data_dict).dropna().reset_index(drop=True)
+
+# Räumliche Interaktion: Kopplung von Temperatur und Höhe
+df['temp_elev_interact'] = df['t2m'] * df['elevation']
+
+# Feature-Liste aktualisieren
+feature_cols = [
+    't2m', 'tp', 'ssrd', 
+    'ro', 'elevation', 'temp_elev_interact'
+]
+
+X = df[feature_cols]
+y = df['target']
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+print(f"Training mit {len(X_train)} Zeilen, Test mit {len(X_test)} Zeilen.")
+
+# ---------------------------------------------------------
+# 4. XGBOOST TRAINING (Optimiert)
+# ---------------------------------------------------------
+print("\nStarte XGBoost Training mit Early Stopping...")
+start_time = time.time()
+
+model_xgb = xgb.XGBRegressor(
+    n_estimators=3000, 
+    max_depth=10,           # Erhöht für Interaktionserkennung
+    learning_rate=0.02,     # Konservativere Rate für höhere Präzision
+    subsample=0.8, 
+    colsample_bytree=0.8,
+    n_jobs=-1, 
+    tree_method='hist',
+    early_stopping_rounds=50,
+    random_state=42
+)
+
+model_xgb.fit(
+    X_train, y_train,
+    eval_set=[(X_test, y_test)],
+    verbose=100
+)
+
+print(f"Training beendet in {time.time() - start_time:.2f} Sekunden.")
+
+# ---------------------------------------------------------
+# 5. EVALUIERUNG
+# ---------------------------------------------------------
+y_pred = model_xgb.predict(X_test)
+rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+r2 = r2_score(y_test, y_pred)
+
+print("\n" + "="*35)
+print(f"XGBOOST ERGEBNIS (OPTIMIERT):")
+print(f"RMSE: {rmse:.4f}")
+print(f"R² Score: {r2:.4f}")
+print("="*35)
+
+# Modell speichern
+# ---------------------------------------------------------
+# 5. SPEICHERN (Korrektur für den TypeError)
+# ---------------------------------------------------------
+# Wir nutzen joblib, um das Scikit-Learn Wrapper-Objekt korrekt zu speichern
+joblib.dump(model_xgb, model_out_path.replace('.json', '.joblib'))
+print(f"Modell erfolgreich gespeichert unter: {model_out_path.replace('.json', '.joblib')}")
+
+# ---------------------------------------------------------
+# 6. FEATURE IMPORTANCE PLOT
+# ---------------------------------------------------------
+plt.rcParams['figure.facecolor'] = 'white'
+plt.rcParams['axes.facecolor'] = 'white'
+
+fig, ax = plt.subplots(figsize=(10, 6))
+feat_importances = pd.Series(model_xgb.feature_importances_, index=feature_cols).sort_values()
+feat_importances.plot(kind='barh', color='#3182bd', ax=ax, width=0.7)
+
+ax.grid(True, axis='x', linestyle='--', alpha=0.4)
+ax.set_xlabel('Importance Score', fontsize=12, fontweight='bold')
+# Titel-Design passend zum Wunsch-Stil
+fig.suptitle('Feature Importance: XGBoost NDSI Model (incl. Lags & Interaction)', 
+             fontsize=16, fontweight='bold', y=0.96)
+
+plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+plt.show()
+
+# ------------------------------------------------
