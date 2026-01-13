@@ -1,0 +1,58 @@
+#Karten Darstellungen der Predictions
+import xarray as xr
+import matplotlib.pyplot as plt
+import os
+import numpy as np
+
+# =========================================================
+# KONFIGURATION
+# =========================================================
+# BASIS-ORDNER (Pfad zum Verzeichnis, nicht zur Datei!)
+base_dir = r"C:\Alpine_Deep_Learning\Ergebnis\Vorhersage\rf\final_bias_cap"
+szenarien_to_plot = [ "ssp119", "ssp126"]
+target_month = "2099-12" 
+
+fig, axes = plt.subplots(1, 2, figsize=(18, 6), sharex=True, sharey=True)
+plt.subplots_adjust(wspace=0.1)
+
+# Speichere das Plottable-Objekt für die Colorbar
+last_im = None
+
+for i, sz in enumerate(szenarien_to_plot):
+    path = os.path.join(base_dir, f"NDSI_Oetztal_{sz}.zarr")
+    
+    if not os.path.exists(path):
+        print(f"⚠️ Datei nicht gefunden: {path}")
+        continue
+        
+    ds = xr.open_zarr(path)
+    
+    # Wähle den Monat aus
+    # .isel(time=0) falls mehrere Tage pro Monat vorhanden sind
+    data_plot = ds["ndsi_rf"].sel(time=target_month).isel(time=0)
+    
+    # Karte zeichnen
+    last_im = data_plot.plot(
+        ax=axes[i], 
+        cmap="terrain", 
+        add_colorbar=False,
+        vmin=0, vmax=1 
+    )
+    
+    axes[i].set_title(f"Scenario: {sz.upper()}", fontsize=14, fontweight='bold')
+    axes[i].set_xlabel("Longitude")
+    axes[i].set_ylabel("Latitude" if i == 0 else "")
+
+# Gemeinsame Colorbar hinzufügen (nutzt last_im statt i)
+if last_im is not None:
+    cbar = fig.colorbar(last_im, ax=axes.ravel().tolist(), orientation='vertical', shrink=0.8, pad=0.02)
+    cbar.set_label('NDSI (Snow Cover)', fontsize=12)
+
+plt.suptitle(f"Comparison of potential Snow Cover in the Ötztal Alps ({target_month})", 
+             fontsize=16, y=1.02, fontweight='bold')
+
+# Speichern als Bild (im Basis-Ordner)
+output_img = os.path.join(base_dir, f"Vergleich_{target_month}_ssp370_585.png")
+plt.savefig(output_img, bbox_inches='tight', dpi=300)
+print(f"✅ Karte wurde gespeichert: {output_img}")
+plt.show()
