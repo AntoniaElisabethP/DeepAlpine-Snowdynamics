@@ -1,0 +1,57 @@
+#DIagramm Darstellung
+import xarray as xr
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+import os
+
+# =========================================================
+# 1. KONFIGURATION
+# =========================================================
+base_dir = r"C:\Alpine_Deep_Learning\Ergebnis\Vorhersage\rf\final_bias_cap"
+szenarien = ["ssp119", "ssp126", "ssp245", "ssp370", "ssp585"]
+colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd'] 
+
+# =========================================================
+# 2. DATEN LADEN & ZEITREIHEN BERECHNEN
+# =========================================================
+mean_data = {}
+
+print("Lade Daten für Zeitreihen...")
+for sz in szenarien:
+    path = os.path.join(base_dir, f"NDSI_Oetztal_{sz}.zarr")
+    if os.path.exists(path):
+        ds = xr.open_zarr(path)
+        
+        # Sicherer Check der Dimensionen für den Mittelwert
+        # Wir mitteln über alles, was NICHT 'time' ist
+        reduce_dims = [d for d in ds["ndsi_rf"].dims if d != 'time']
+        
+        mean_series = ds["ndsi_rf"].mean(dim=reduce_dims)
+        mean_data[sz] = mean_series.to_pandas()
+
+# =========================================================
+# 3. PLOT: NDSI-CURVE (Zeitreihe)
+# =========================================================
+plt.figure(figsize=(11, 7))
+
+for i, sz in enumerate(szenarien):
+    if sz in mean_data:
+        df_plot = mean_data[sz]
+        plt.plot(df_plot.index, df_plot.values, marker='o', label=sz, color=colors[i], linewidth=2)
+
+# Achsen-Design wie in deiner Vorlage
+plt.title("Mean NDSI-Curve in Winter 2099/2100 - Ötztaler Alps", fontsize=16, fontweight='bold', pad=15)
+plt.xlabel("Monat", fontsize=12)
+plt.ylabel("NDSI (Schneebedeckung)", fontsize=12)
+plt.grid(True, linestyle='--', alpha=0.6)
+plt.legend(fontsize=10, loc='upper right')
+
+# Datumsformatierung auf der X-Achse
+plt.gcf().autofmt_xdate() 
+
+plt.tight_layout()
+output_path = os.path.join(base_dir, "NDSI_Validation_Curve_2100.png")
+#plt.savefig(output_path, dpi=300)
+print(f"✅ Diagramm gespeichert unter: {output_path}")
+plt.show()
