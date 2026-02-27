@@ -1,0 +1,141 @@
+# Extrahierung der Schneegrenze aus RF_classifier
+import xarray as xr
+import numpy as np
+import pandas as pd
+import joblib
+import matplotlib.pyplot as plt
+import os
+
+# --- SETUP ---
+model_path = r"C:\Alpine_Deep_Learning\Ergebnis\RF_Modell\RF_trainiert\snow_model_3classes.joblib"
+dem_path = r"C:\Alpine_Deep_Learning\ZARR\dem.zarr"
+era5_path = r"C:\Alpine_Deep_Learning\ZARR\era5.zarr_02" 
+
+print("Lade Modell und Basis-Daten...")
+rf = joblib.load(model_path)
+ds_dem = xr.open_zarr(dem_path, consolidated=False)
+ds_era = xr.open_zarr(era5_path, consolidated=False)
+
+dem_raw = ds_dem['elevation'].squeeze()
+elevations = dem_raw.values.flatten()
+
+# Topographie Features (einmalig berechnen)
+dy, dx = np.gradient(dem_raw.values)
+slope = (np.arctan(np.sqrt(dx**2 + dy**2)) * (180 / np.pi)).flatten()
+aspect = (np.arctan2(-dx, dy) * (180 / np.pi)).flatten()
+
+# --- TRACKING ---
+times = pd.to_datetime(ds_era.time.values)
+# Zeitraum eingrenzen (z.B. ein halbes Jahr für die Übersicht)
+# Wir nehmen jeden 5. Tag für eine schnellere Berechnung
+sample_dates = pd.date_range(start=times.min(), end=times.max(), freq='5D')
+
+results = []
+
+print(f"Starte Tracking der Schneegrenze für {len(sample_dates)} Zeitpunkte...")
+
+for current_date in sample_dates:
+    doy = current_date.dayofyear
+    era5_idx = np.argmin(np.abs(times - current_date))
+    
+    # Sicherer Fix für die Gitter-Interpolation
+    # Wir projizieren die ERA5-Temperatur direkt auf die Koordinaten des DEM
+    temp_values = ds_era['t2m'].isel(time=era5_idx).interp(
+        latitude=dem_raw.latitude, 
+        longitude=dem_raw.longitude,
+        method="linear"
+    ).values.flatten()
+    
+    # Tabelle für diesen Tag bauen
+    df_step = pd.DataFrame({
+        'elevation': elevations,
+        'slope': slope,
+        'aspect': aspect,
+        'temp': temp_values,
+        'doy': doy
+    }).dropna()
+    
+    if df_step.empty:
+        continue
+        
+    # Vorhersage (0=Boden, 1=Matsch, 2=Viel Schnee)
+    preds = rf.predict(df_step)
+    
+    # Schneegrenze extrahieren (Median der Höhe aller Pixel mit Klasse 1 oder 2)
+    schnee_hoehen = df_step.loc[preds >= 1, 'elevation']
+    
+    if not schnee_hoehen.empty:
+        # 20%-Quantil ist oft eine gute Annäherung an die untere Schneegrenze
+        sla = schnee_hoehen.quantile(0.20)
+        results.append({'datum': current_date, 'schneegrenze': sla, 'doy': doy})
+        print(f"  {current_date.date()}: Schneegrenze bei {sla:.0f} m")
+
+# --- ERGEBNISSE SPEICHERN & PLOTTEN ---
+df_res = pd.DataFrame(results)
+
+# Grafik
+plt.figure(figsize=(12, 6))
+plt.plot(df_res['datum'], df_res['schneegrenze'], marker='o', color='royalblue', linestyle='-', markersize=4)
+
+plt.gca().invert_yaxis() # Höhere Werte (Berge) nach oben
+plt.title(f"Verlauf der Schneegrenze im Ötztal\n(Basierend auf {os.path.basename(era5_path)})")
+plt.ylabel("Höhe über Meeresspiegel [m]")
+plt.xlabel("Datum")
+plt.grid(True, linestyle='--', alpha=0.7)
+
+# Bereich unter der Linie einfärben (Schnee-Bereich)
+plt.fill_between(df_res['datum'], df_res['schneegrenze'], dem_raw.max().values, color='aliceblue', alpha=0.5)
+
+plt.tight_layout()
+plt.show()
+
+# Optional: Ergebnisse als CSV speichern für Excel
+ df_res.to_csv(r"C:\Alpine_Deep_Learning\Ergebnis\Schneegrenze_Verlauf.csv", index=False)
+
+# --- WEITERFÜHRENDE ANALYSE 
+
+# 1. Vorbereitung der Zeitreihen
+df_res['Jahr'] = df_res['datum'].dt.year
+df_res['Monat'] = df_res['datum'].dt.month
+
+# 2. Berechnung der Snow Cover Period (SCP)
+# Wir definieren eine Referenzhöhe (z.B. 2000m). 
+# Wie viele Tage im Jahr liegt die Schneegrenze unter dieser Höhe?
+ref_elevation = 2000
+# Da wir alle 5 Tage gesampelt haben (freq='5D'), multiplizieren wir mit 5 für die Tage
+scp_stats = df_res[df_res['schneegrenze'] <= ref_elevation].groupby('Jahr').size() * 5
+
+# 3. Jährliche mittlere Schneegrenze
+annual_sla = df_res.groupby('Jahr')['schneegrenze'].mean()
+
+# --- GRAFIK: SCP vs. MITTLERE SCHNEEGRENZE ---
+fig, ax1 = plt.subplots(figsize=(12, 7))
+
+# Balkendiagramm für die Schneebedeckungsdauer (SCP)
+ax1.bar(scp_stats.index, scp_stats.values, color='lightsteelblue', alpha=0.7, label=f'Snow Cover Period (Tage < {ref_elevation}m)')
+ax1.set_xlabel('Kalenderjahr')
+ax1.set_ylabel('Anzahl Schneetage (Tage)', color='darkblue')
+ax1.tick_params(axis='y', labelcolor='darkblue')
+
+# Zweite Achse für die mittlere Schneegrenze
+ax2 = ax1.twinx()
+ax2.plot(annual_sla.index, annual_sla.values, color='crimson', marker='s', linewidth=2, label='Mittlere Schneegrenze (SLA)')
+ax2.set_ylabel('Mittlere Höhe der Schneegrenze [m]', color='crimson')
+ax2.tick_params(axis='y', labelcolor='crimson')
+ax2.invert_yaxis() # Invertieren, damit "höher am Berg" oben im Plot ist
+
+# Trendlinie für die Schneegrenze 
+z = np.polyfit(annual_sla.index, annual_sla.values, 1)
+p = np.poly1d(z)
+ax2.plot(annual_sla.index, p(annual_sla.index), "r--", alpha=0.5, label='Trend SLA')
+
+plt.title(f'Klimawandel im Ötztal: Snow Cover Period vs. Schneegrenze\n(Referenzhöhe: {ref_elevation} m ü.M.)')
+fig.legend(loc='upper left', bbox_to_anchor=(0.1, 0.9))
+plt.grid(True, axis='y', linestyle=':', alpha=0.5)
+plt.tight_layout()
+plt.show()
+
+# --- TEXTLICHE ZUSAMMENFASSUNG FÜR DEN BERICHT ---
+print(f"Mittlere Schneegrenze über den Zeitraum: {annual_sla.mean():.0f} m")
+print(f"Trend: Die Schneegrenze verändert sich um ca. {z[0]:.2f} Meter pro Jahr.")
+print(f"Durchschnittliche SCP auf {ref_elevation}m: {scp_stats.mean():.1f} Tage/Jahr.")
