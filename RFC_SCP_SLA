@@ -1,0 +1,99 @@
+#Abbildung SCP, Schneegrenze 
+# 1. Lade die bereits berechneten Daten
+#ergebnis_pfad = r"C:\Alpine_Deep_Learning\Verarbeitete_Daten\schneegrenze.csv"
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+
+# --- SETUP ---
+ergebnis_pfad = r"C:\Alpine_Deep_Learning\Verarbeitete_Daten\schneegrenze.csv"
+
+
+if not os.path.exists(ergebnis_pfad):
+    print(f"❌ Datei nicht gefunden: {ergebnis_pfad}")
+else:
+    # 1. Daten mit richitgen Trennzeichen (sep=';')
+    # Wir nutzen 'on_bad_lines', falls Excel am Ende zu viele ; gemacht hat
+    df_res = pd.read_csv(ergebnis_pfad, sep=';', on_bad_lines='skip')
+    
+    # --- AUTOMATISCHE SPALTEN-REINIGUNG ---
+    #  komplett leere Spalten löschen (die vielen ;;; am Ende)
+    df_res = df_res.dropna(axis=1, how='all')
+    # Leerzeichen in Spaltennamen entfernen
+    df_res.columns = df_res.columns.str.strip()
+    
+    print("Gefundene bereinigte Spalten:", df_res.columns.tolist())
+
+    # spalten finden
+    col_date = [c for c in df_res.columns if 'dat' in c.lower()][0]
+    col_snow = [c for c in df_res.columns if 'schnee' in c.lower()][0]
+
+    # 2. Daten konvertieren
+    # Wir geben das Format explizit an, damit es schnell geht (Tag.Monat.Jahr)
+    df_res['Datum_Clean'] = pd.to_datetime(df_res[col_date], dayfirst=True)
+    df_res['Jahr'] = df_res['Datum_Clean'].dt.year
+    
+    # 3. SCP und SLA Analyse
+    ref_elevation = 2000 #anpassbar
+    # Berechnung der Schneetage (Faktor 5 für 5-Tage-Intervall)
+    # .size() zählt die Einträge pro Jahr
+    scp_stats = df_res[df_res[col_snow] <= ref_elevation].groupby('Jahr').size() * 5
+    annual_sla = df_res.groupby('Jahr')[col_snow].mean()
+
+    # --- PLOTTEN ---
+    fig, ax1 = plt.subplots(figsize=(12, 7))
+
+    # Balken für Snow Cover Period (SCP)
+    ax1.bar(scp_stats.index, scp_stats.values, color='skyblue', alpha=0.6, label='Schneetage (SCP)')
+    ax1.set_ylabel('Schneetage pro Jahr (Tage)', color='darkblue')
+
+    # Linie & Trend für Schneegrenze (SLA)
+    ax2 = ax1.twinx()
+    ax2.plot(annual_sla.index, annual_sla.values, color='red', marker='s', label='Mittlere SLA')
+    
+    # Trendberechnung
+    z = np.polyfit(annual_sla.index, annual_sla.values, 1)
+    p = np.poly1d(z)
+    ax2.plot(annual_sla.index, p(annual_sla.index), "r--", label=f"Trend: {z[0]:.2f}m/Jahr")
+
+    ax2.invert_yaxis() 
+    ax2.set_ylabel('Schneegrenze [m ü.M.]', color='red')
+    
+    plt.title(f'Diplomarbeit Analyse: Schneebedeckung im Ötztal\n(Referenzhöhe: {ref_elevation}m)')
+    fig.legend(loc='upper left', bbox_to_anchor=(0.1, 0.9))
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+    print("\n--- Statistik für Bericht ---")
+    print(f"Durchschnittliche Schneetage auf {ref_elevation}m: {scp_stats.mean():.1f} Tage")
+    print(f"Trend der Schneegrenze: {z[0]:.2f} Meter Anstieg pro Jahr")
+
+    # --- Trendberechnung für Schneetage (SCP) ---
+# Wir nutzen scp_stats (die Jahre als Index und die Tage als Werte)
+z_scp = np.polyfit(scp_stats.index, scp_stats.values, 1)
+p_scp = np.poly1d(z_scp)
+
+# --- PLOTTEN (Erweiterung) ---
+fig, ax1 = plt.subplots(figsize=(12, 7))
+
+# Balken für SCP
+ax1.bar(scp_stats.index, scp_stats.values, color='skyblue', alpha=0.6, label='Schneetage (SCP)')
+
+# NEU: Trendlinie für Schneetage (Blau gestrichelt)
+ax1.plot(scp_stats.index, p_scp(scp_stats.index), "b--", alpha=0.7, 
+         label=f"Trend SCP: {z_scp[0]:.2f} Tage/Jahr")
+
+ax1.set_xlabel('Jahr')
+ax1.set_ylabel('Snow Cover Period [Tage]', color='darkblue')
+ax1.tick_params(axis='y', labelcolor='darkblue')
+
+# ... (Rest des Codes für ax2 / SLA bleibt gleich) ...
+
+# Legende aktualisieren
+fig.legend(loc='upper left', bbox_to_anchor=(0.12, 0.95), ncol=2) 
+plt.tight_layout()
+plt.show()
+
+print(f"Trend der Schneetage: {z_scp[0]:.2f} Tage pro Jahr")
