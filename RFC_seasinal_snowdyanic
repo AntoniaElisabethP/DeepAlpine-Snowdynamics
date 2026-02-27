@@ -1,0 +1,117 @@
+#saisonale Schnneedyanik mithilfe RFC
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+
+# --- SETUP ---
+ergebnis_pfad =r"C:\Alpine_Deep_Learning\Verarbeitete_Daten\schneegrenze.csv"
+
+if not os.path.exists(ergebnis_pfad):
+    print(f"❌ Datei nicht gefunden: {ergebnis_pfad}")
+else:
+    # 1. Daten laden (Semikolon als Trenner)
+    df_res = pd.read_csv(ergebnis_pfad, sep=';', on_bad_lines='skip')
+    df_res.columns = df_res.columns.str.strip()
+    
+    # Spalten finden
+    col_date = [c for c in df_res.columns if 'dat' in c.lower()][0]
+    col_snow = [c for c in df_res.columns if 'schnee' in c.lower()][0]
+
+    # 2. Zeitliche Aufbereitung
+    df_res['Datum_Clean'] = pd.to_datetime(df_res[col_date], dayfirst=True)
+    df_res['Jahr'] = df_res['Datum_Clean'].dt.year
+    
+    # 3. Jährliches Mittel der Schneegrenze berechnen
+    annual_sla = df_res.groupby('Jahr')[col_snow].mean()
+
+    # 4. Lineare Regression (Der Trend)
+    # x = Jahre, y = Höhenwerte
+    x = annual_sla.index
+    y = annual_sla.values
+    z = np.polyfit(x, y, 1)
+    p = np.poly1d(z)
+
+    # --- VISUALISIERUNG ---
+    plt.figure(figsize=(12, 6))
+    
+    # Einzelne Jahrespunkte
+    plt.plot(x, y, color='red', marker='s', linestyle='', label='Mittlere Jahresschneegrenze')
+    
+    # Die Trendlinie
+    plt.plot(x, p(x), "r--", linewidth=2, label=f"Lineare Verschiebung: {z[0]:.2f} m/Jahr")
+
+    # Grafik-Design
+    plt.gca().invert_yaxis() # WICHTIG: Gipfel sind oben, Täler unten
+    plt.title('Langfristige Verschiebung der Schneegrenze im Ötztal (1990-2020)', fontsize=14)
+    plt.ylabel('Höhe der Schneegrenze [m ü.M.]', fontsize=12)
+    plt.xlabel('Jahr', fontsize=12)
+    plt.grid(True, linestyle=':', alpha=0.6)
+    plt.legend(loc='upper left', fontsize=11)
+    
+    # Textbox mit dem Gesamtergebnis
+gesamt_shift = z[0] * (x[-1] - x[0])
+plt.text(x[0], y.max(), f"Gesamtverschiebung: ~{gesamt_shift:.1f} Meter", 
+             bbox=dict(facecolor='white', alpha=0.5))
+
+plt.tight_layout()
+plt.show()
+
+print(f"Statistischer Anstieg der Schneegrenze: {z[0]:.2f} Meter pro Jahr.")
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+
+# 1. Daten laden
+df_res = pd.read_csv(ergebnis_pfad, sep=';', on_bad_lines='skip')
+df_res.columns = df_res.columns.str.strip()
+col_date = [c for c in df_res.columns if 'dat' in c.lower()][0]
+col_snow = [c for c in df_res.columns if 'schnee' in c.lower()][0]
+
+# 2. Zeitliche Aufbereitung ( Reihenfolge einhalten)
+df_res['Datum_Clean'] = pd.to_datetime(df_res[col_date], dayfirst=True)
+df_res['Monat'] = df_res['Datum_Clean'].dt.month
+df_res['Jahr'] = df_res['Datum_Clean'].dt.year
+# Hier erstellen wir die fehlende Spalte 'Jahrzehnt'
+df_res['Jahrzehnt'] = (df_res['Jahr'] // 10) * 10
+
+# 3. Filtern: Nur volle Jahrzehnte bis 2019 (keine 2020er)
+df_plot = df_res[df_res['Jahrzehnt'].isin([1990, 2000, 2010])].copy()
+
+# 4. Fokus auf die relevante Schneesaison (Okt - Mai)
+winter_months = [10, 11, 12, 1, 2, 3, 4, 5]
+df_winter = df_plot[df_plot['Monat'].isin(winter_months)].copy()
+
+# --- VISUALISIERUNG ---
+plt.figure(figsize=(12, 7))
+
+# errorbar=None entfernt die Schatten/Standardabweichungen
+sns.lineplot(data=df_winter, x='Monat', y=col_snow, hue='Jahrzehnt', 
+             palette='viridis', marker='o', linewidth=2.5, errorbar=None)
+
+# Optik für die Diplomarbeit
+plt.gca().invert_yaxis() # Gipfel oben
+plt.xticks(winter_months, ['Okt', 'Nov', 'Dez', 'Jan', 'Feb', 'Mär', 'Apr', 'Mai'])
+
+plt.title('Saisonale Verschiebung der Schneegrenze im Ötztal\nVergleich der Dekaden 1990-2019', fontsize=14)
+plt.ylabel('Höhe der Schneegrenze [m ü.M.]', fontsize=12)
+plt.xlabel('Monat', fontsize=12)
+
+plt.grid(True, linestyle='--', alpha=0.5)
+# Beschriftung der Legende
+plt.legend(title='Dekade', labels=['1990er', '2000er', '2010er'], loc='upper left')
+
+plt.tight_layout()
+plt.show()
+
+# --- ZUSATZ: STATISTIK FÜR DEN TEXT ---
+stats = df_winter.groupby(['Jahrzehnt', 'Monat'])[col_snow].mean().unstack()
+print("\n--- Mittlere Schneegrenzhöhen pro Monat und Dekade ---")
+print(stats)
