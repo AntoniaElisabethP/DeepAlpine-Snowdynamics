@@ -1,0 +1,119 @@
+#Random Forest Classification: Schneedyanamik
+import xarray as xr
+import numpy as np
+import pandas as pd
+import joblib
+import os
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.model_selection import train_test_split
+
+# --- FUNKTIONEN ---
+def calculate_slope_aspect(da):
+    dy, dx = np.gradient(da.values)
+    slope = np.arctan(np.sqrt(dx**2 + dy**2)) * (180 / np.pi)
+    aspect = np.arctan2(-dx, dy) * (180 / np.pi)
+    return slope, aspect
+
+def collect_data(zarr_path, label, ds_dem, ds_era5, era5_times):
+    print(f"\n--- Verarbeite {label} ---")
+    ds = xr.open_zarr(zarr_path, decode_times=False, consolidated=False)
+    var_name = [v for v in ds.data_vars if v.lower() == 'ndsi'][0]
+    
+    # Zeit-Reparatur
+    units = ds.time.attrs.get('units', 'days since 1999-01-15')
+    try:
+        raw_date_part = units.split('since ')[1].split(' ')[0].replace('-', '')
+        base_date_str = f"{raw_date_part[:4]}-{raw_date_part[4:6]}-{raw_date_part[6:8]}"
+        base_date = pd.to_datetime(base_date_str)
+        fixed_times = base_date + pd.to_timedelta(ds.time.values, unit='D')
+    except:
+        fixed_times = pd.date_range(start="2000-01-01", periods=len(ds.time), freq="16D")
+    
+    dem_raw = ds_dem['elevation'].squeeze()
+    new_lat = np.linspace(dem_raw.latitude.max().values, dem_raw.latitude.min().values, ds[var_name].shape[1])
+    new_lon = np.linspace(dem_raw.longitude.min().values, dem_raw.longitude.max().values, ds[var_name].shape[2])
+    
+    dem_30m = dem_raw.rename({'latitude': 'y', 'longitude': 'x'}).interp_like(
+        xr.DataArray(coords={'y': new_lat, 'x': new_lon}, dims=['y', 'x']), method="nearest"
+    )
+    slope, aspect = calculate_slope_aspect(dem_30m)
+    
+    daily_dfs = []
+    for t_idx in range(0, len(ds.time), 10):
+        current_date = fixed_times[t_idx]
+        doy = current_date.dayofyear
+        if 120 < doy < 274: continue # Sommer überspringen
+            
+        time_diff = np.abs(era5_times - current_date)
+        era5_idx = np.argmin(time_diff)
+        
+        temp_30m = ds_era5['t2m'].isel(time=era5_idx).interp(
+            latitude=xr.DataArray(new_lat, dims="y"), 
+            longitude=xr.DataArray(new_lon, dims="x"),
+            method="linear"
+        ).values.flatten()
+        
+        df = pd.DataFrame({
+            'elevation': dem_30m.values.flatten(),
+            'slope': slope.flatten(),
+            'aspect': aspect.flatten(),
+            'temp': temp_30m,
+            'doy': doy,
+            'ndsi': ds[var_name].isel(time=t_idx).values.flatten()
+        }).dropna()
+        
+        if len(df) > 25000:
+            df = df.sample(25000, random_state=42)
+        daily_dfs.append(df)
+        print(f"  Tag {t_idx} extrahiert: {current_date.date()}")
+        
+    return pd.concat(daily_dfs)
+
+# --- MAIN ---
+paths = {
+    "L5": r"C:\Alpine_Deep_Learning\Verarbeitete_Daten\NDSI\NDSI_L5_all.zarr-20260223T152352Z-1-001\NDSI_L5_all.zarr",
+    "L8": r"C:\Alpine_Deep_Learning\Verarbeitete_Daten\NDSI\NDSI_all_L8.zarr-20260223T152355Z-1-001\NDSI_all_L8.zarr",
+    "DEM": r"C:\Alpine_Deep_Learning\ZARR\dem.zarr",
+     "ERA5": r"C:\Alpine_Deep_Learning\ZARR\era5.zarr_02"
+}
+
+try:
+    ds_dem = xr.open_zarr(paths["DEM"], consolidated=False)
+    ds_era5 = xr.open_zarr(paths["ERA5"], consolidated=False)
+    era5_times = pd.to_datetime(ds_era5.time.values)
+
+    df_all = pd.concat([collect_data(paths["L5"], "L5", ds_dem, ds_era5, era5_times),
+                        collect_data(paths["L8"], "L8", ds_dem, ds_era5, era5_times)]).reset_index(drop=True)
+
+    # --- MULTI-CLASS DEFINITION ---
+    # Klasse 0: Kein Schnee (NDSI < 0.4)
+    # Klasse 1: Matsch / Wenig Schnee (0.4 <= NDSI < 0.7)
+    # Klasse 2: Viel Schnee / Pulver (NDSI >= 0.7)
+    conditions = [
+        (df_all['ndsi'] < 0.4),
+        (df_all['ndsi'] >= 0.4) & (df_all['ndsi'] < 0.7),
+        (df_all['ndsi'] >= 0.7)
+    ]
+    choices = [0, 1, 2]
+    df_all['target'] = np.select(conditions, choices, default=0)
+
+    features = ['elevation', 'slope', 'aspect', 'temp', 'doy']
+    X_train, X_test, y_train, y_test = train_test_split(df_all[features], df_all['target'], test_size=0.2, random_state=42)
+
+    print(f"\nTraining Multi-Class Modell mit {len(X_train)} Pixeln...")
+    # Tiefere Bäume für komplexere Klassen-Unterscheidung
+    rf = RandomForestClassifier(n_estimators=100, max_depth=20, n_jobs=-1, random_state=42)
+    rf.fit(X_train, y_train)
+
+    print("\nERGEBNIS (0=Boden, 1=Matsch, 2=Viel Schnee):")
+    y_pred = rf.predict(X_test)
+    print(classification_report(y_test, y_pred))
+
+    save_path = r"C:\Alpine_Deep_Learning\Ergebnis\RF_Modell\RF_trainiert\snow_model_3classes.joblib"
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    joblib.dump(rf, save_path)
+    print(f"\n✅ 3-Klassen-Modell gespeichert: {save_path}")
+
+except Exception as e:
+    print(f"\n❌ Fehler: {e}")
